@@ -305,6 +305,82 @@ def fetch_route_latest_samples(
     return [dict(row) for row in rows]
 
 
+def fetch_fastest_commute_for_timeframe(
+    db_path: str | Path,
+    retention_days: int = 7,
+    route_key: str | None = None,
+    weekdays: list[str] | None = None,
+    start_time: str | None = None,
+    end_time: str | None = None,
+) -> dict[str, Any] | None:
+    where_clauses = [
+        "collected_at >= datetime('now', ?)",
+        "status = 'success'",
+    ]
+    parameters: list[Any] = [f'-{int(retention_days)} days']
+
+    if route_key is not None:
+        where_clauses.append("route_key = ?")
+        parameters.append(route_key)
+
+    if weekdays:
+        weekday_values = []
+        for weekday in weekdays:
+            weekday_name = str(weekday).strip().title()
+            mapping = {
+                "Monday": "1",
+                "Tuesday": "2",
+                "Wednesday": "3",
+                "Thursday": "4",
+                "Friday": "5",
+                "Saturday": "6",
+                "Sunday": "0",
+            }
+            if weekday_name in mapping:
+                weekday_values.append(mapping[weekday_name])
+        if weekday_values:
+            placeholders = ", ".join("?" for _ in weekday_values)
+            where_clauses.append(
+                f"CAST(strftime('%w', collected_at) AS INTEGER) IN ({placeholders})"
+            )
+            parameters.extend(weekday_values)
+
+    if start_time:
+        start = str(start_time).strip()
+        if start:
+            where_clauses.append("time(collected_at) >= ?")
+            parameters.append(start)
+    if end_time:
+        end = str(end_time).strip()
+        if end:
+            where_clauses.append("time(collected_at) <= ?")
+            parameters.append(end)
+
+    query = f"""
+        SELECT
+            collected_at,
+            route_key,
+            route_name,
+            origin_label,
+            destination_label,
+            duration_minutes
+        FROM travel_samples
+        WHERE {' AND '.join(where_clauses)}
+        ORDER BY duration_minutes ASC, collected_at DESC
+        LIMIT 1
+    """
+
+    connection = open_connection(db_path)
+    try:
+        row = connection.execute(query, parameters).fetchone()
+    finally:
+        connection.close()
+
+    if row is None:
+        return None
+    return dict(row)
+
+
 def fetch_summary_stats(
     db_path: str | Path,
     retention_days: int = 7,

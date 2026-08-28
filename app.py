@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import folium
 import pandas as pd
@@ -25,6 +27,30 @@ DAY_ORDER = [
     "Saturday",
     "Sunday",
 ]
+AUSTIN_TIMEZONE = ZoneInfo("America/Chicago")
+
+
+def parse_local_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    value = str(value).strip()
+    try:
+        parsed = datetime.fromisoformat(value.replace(" ", "T"))
+    except ValueError:
+        try:
+            parsed = datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=AUSTIN_TIMEZONE)
+    return parsed.astimezone(AUSTIN_TIMEZONE)
+
+
+def format_local_timestamp(value: str | None) -> str:
+    parsed = parse_local_datetime(value)
+    if parsed is None:
+        return "N/A"
+    return parsed.strftime("%Y-%m-%d %H:%M:%S %Z")
 
 
 st.set_page_config(
@@ -102,7 +128,7 @@ def load_history(
     if not rows:
         return pd.DataFrame()
     frame = pd.DataFrame(rows)
-    frame["Timestamp"] = pd.to_datetime(frame["collected_at"], utc=True)
+    frame["Timestamp"] = frame["collected_at"].apply(parse_local_datetime)
     frame["Day"] = frame["Timestamp"].dt.day_name()
     frame["Time of Day"] = frame["Timestamp"].dt.strftime("%H:%M")
     frame["Duration (mins)"] = frame["duration_minutes"].round(2)
@@ -1131,7 +1157,7 @@ with col2:
 with col3:
     if latest_record:
         latest_label = f"{latest_record['duration_minutes']:.2f} mins"
-        latest_subtitle = f"Captured at {latest_record['collected_at']} UTC"
+        latest_subtitle = f"Captured at {format_local_timestamp(latest_record['collected_at'])}"
     else:
         latest_label = "No data"
         latest_subtitle = "Awaiting the first route check"
@@ -1145,6 +1171,72 @@ route_columns = st.columns(max(1, min(3, len(route_catalog))))
 for index, route in enumerate(route_catalog):
     with route_columns[index % len(route_columns)]:
         render_route_card(route, activity_by_key.get(route["key"]))
+
+st.markdown(
+    '<div class="section-title">Fastest Commute Finder</div>',
+    unsafe_allow_html=True,
+)
+settings = load_app_config()
+db_path = BASE_DIR / str(settings["app"]["database_path"])
+
+timeframe_mode = st.radio(
+    "Fastest commute scope",
+    ["All week", "Specific days and times"],
+    horizontal=True,
+)
+
+if timeframe_mode == "All week":
+    all_week_fastest = database.fetch_fastest_commute_for_timeframe(
+        db_path,
+        retention_days=retention_days,
+        route_key=selected_route,
+    )
+    if all_week_fastest is None:
+        st.info("No successful commute samples are available for this route window yet.")
+    else:
+        duration_value = float(all_week_fastest["duration_minutes"])
+        st.metric(
+            "Fastest commute this week",
+            f"{duration_value:.2f} mins",
+            f"Reported at {format_local_timestamp(all_week_fastest['collected_at'])}",
+        )
+else:
+    selected_weekdays = st.multiselect(
+        "Days of week",
+        DAY_ORDER,
+        default=DAY_ORDER,
+        help="Filter the fastest commute to the selected days.",
+    )
+    start_time_input = st.text_input(
+        "Start time (HH:MM)",
+        value="07:00",
+        help="Earliest time in the window to inspect.",
+    )
+    end_time_input = st.text_input(
+        "End time (HH:MM)",
+        value="09:00",
+        help="Latest time in the window to inspect.",
+    )
+    if st.button("Show fastest in selected timeframe"):
+        custom_result = database.fetch_fastest_commute_for_timeframe(
+            db_path,
+            retention_days=retention_days,
+            route_key=selected_route,
+            weekdays=selected_weekdays,
+            start_time=start_time_input,
+            end_time=end_time_input,
+        )
+        if custom_result is None:
+            st.warning(
+                "No commute samples match the selected day/time window. "
+                "Try widening the range or selecting more days."
+            )
+        else:
+            duration_value = float(custom_result["duration_minutes"])
+            st.success(
+                "Fastest commute in the selected timeframe: "
+                f"{duration_value:.2f} mins (reported at {format_local_timestamp(custom_result['collected_at'])})."
+            )
 
 st.markdown(
     '<div class="section-title">Route Overview</div>',

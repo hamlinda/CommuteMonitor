@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import requests
 import yaml
@@ -23,6 +24,7 @@ BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_CONFIG_PATH = BASE_DIR / "config.yaml"
 LOG_FORMAT = "%(asctime)s [%(levelname)s] %(message)s"
 UTC = timezone.utc
+AUSTIN_TIMEZONE = ZoneInfo("America/Chicago")
 
 
 @dataclass(frozen=True)
@@ -66,7 +68,7 @@ def load_config(config_path: str | Path) -> dict[str, Any]:
     app_config.setdefault("interval_seconds", 1800)
     app_config.setdefault("retention_days", 7)
     app_config.setdefault("database_path", "travel_data.db")
-    app_config.setdefault("timezone", "UTC")
+    app_config.setdefault("timezone", "America/Chicago")
     tracking = config.setdefault("tracking", {})
     tracking.setdefault("routing_profile", "driving")
     tracking.setdefault(
@@ -157,7 +159,7 @@ def save_config(config_path: str | Path, config: dict[str, Any]) -> None:
 
 
 def current_timestamp() -> str:
-    return datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
+    return datetime.now(AUSTIN_TIMEZONE).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def build_session(user_agent: str) -> requests.Session:
