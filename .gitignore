@@ -1,0 +1,18 @@
+.venv/
+__pycache__/
+*.pyc
+
+# Local travel data / personal route info
+travel_data.db
+travel_data*.db
+*.sqlite
+*.sqlite3
+config.yaml
+
+# Runtime artifacts
+.worker.pid
+.web.pid
+.worker.log
+.web.log
+.streamlit/
+logs/
