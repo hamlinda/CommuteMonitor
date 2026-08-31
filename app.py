@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import io
 import json
+import math
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-import folium
 import pandas as pd
 import plotly.express as px
+import pydeck as pdk
+import requests
 import streamlit as st
-from streamlit_folium import st_folium
+from PIL import Image, ImageDraw
 
 import database
 import tracker
@@ -51,6 +54,119 @@ def format_local_timestamp(value: str | None) -> str:
     if parsed is None:
         return "N/A"
     return parsed.strftime("%Y-%m-%d %H:%M:%S %Z")
+
+
+def build_route_preview_image(
+    line_points: list[tuple[float, float]],
+    width: int = 1200,
+    height: int = 520,
+) -> Image.Image:
+    """Create a route image preview with an OSM basemap when available."""
+    if len(line_points) < 2:
+        image = Image.new("RGB", (width, height), "#eef6fb")
+        return image
+
+    lats = [point[0] for point in line_points]
+    lons = [point[1] for point in line_points]
+    lat_min, lat_max = min(lats), max(lats)
+    lon_min, lon_max = min(lons), max(lons)
+
+    image = Image.new("RGB", (width, height), "#eef6fb")
+    draw = ImageDraw.Draw(image)
+
+    def latlon_to_tile(lat: float, lon: float, zoom: int) -> tuple[float, float]:
+        n = 2.0**zoom
+        x = ((lon + 180.0) / 360.0) * n
+        lat_rad = math.radians(lat)
+        y = (1.0 - (math.asinh(math.tan(lat_rad)) / math.pi)) / 2.0 * n
+        return x, y
+
+    zoom = 12
+    min_tx, min_ty = latlon_to_tile(lat_min, lon_min, zoom)
+    max_tx, max_ty = latlon_to_tile(lat_max, lon_max, zoom)
+    x0 = int(math.floor(min(min_tx, max_tx))) - 1
+    x1 = int(math.floor(max(min_tx, max_tx))) + 1
+    y0 = int(math.floor(min(min_ty, max_ty))) - 1
+    y1 = int(math.floor(max(min_ty, max_ty))) + 1
+
+    tile_size = 256
+    tile_cols = max(1, x1 - x0 + 1)
+    tile_rows = max(1, y1 - y0 + 1)
+    max_tiles = 36
+
+    if tile_cols * tile_rows <= max_tiles:
+        stitched = Image.new(
+            "RGB",
+            (tile_cols * tile_size, tile_rows * tile_size),
+            "#dbeafe",
+        )
+        session = requests.Session()
+        session.headers.update({"User-Agent": "CommuteMonitor/1.0"})
+        loaded = 0
+        for tx in range(x0, x1 + 1):
+            for ty in range(y0, y1 + 1):
+                tile_url = f"https://tile.openstreetmap.org/{zoom}/{tx}/{ty}.png"
+                try:
+                    response = session.get(tile_url, timeout=5)
+                    response.raise_for_status()
+                    tile_image = Image.open(io.BytesIO(response.content)).convert(
+                        "RGB"
+                    )
+                    stitched.paste(
+                        tile_image,
+                        ((tx - x0) * tile_size, (ty - y0) * tile_size),
+                    )
+                    loaded += 1
+                except requests.RequestException:
+                    continue
+        if loaded > 0:
+            image = stitched.resize((width, height), Image.Resampling.BICUBIC)
+            draw = ImageDraw.Draw(image)
+
+    stitched_width = tile_cols * tile_size
+    stitched_height = tile_rows * tile_size
+
+    def project(lat: float, lon: float) -> tuple[int, int]:
+        tx, ty = latlon_to_tile(lat, lon, zoom)
+        px = (tx - x0) * tile_size
+        py = (ty - y0) * tile_size
+        x = int(px * width / max(stitched_width, 1))
+        y = int(py * height / max(stitched_height, 1))
+        return (x, y)
+
+    polyline = [project(lat, lon) for lat, lon in line_points]
+    draw.line(polyline, fill="#2563eb", width=6)
+
+    start = polyline[0]
+    end = polyline[-1]
+    marker_radius = 9
+    draw.ellipse(
+        (
+            start[0] - marker_radius,
+            start[1] - marker_radius,
+            start[0] + marker_radius,
+            start[1] + marker_radius,
+        ),
+        fill="#10b981",
+        outline="#064e3b",
+        width=2,
+    )
+    draw.ellipse(
+        (
+            end[0] - marker_radius,
+            end[1] - marker_radius,
+            end[0] + marker_radius,
+            end[1] + marker_radius,
+        ),
+        fill="#ef4444",
+        outline="#7f1d1d",
+        width=2,
+    )
+
+    draw.rectangle((12, 12, 302, 54), fill=(255, 255, 255, 220))
+    draw.text((20, 22), "Route overlay on reference map", fill="#0f172a")
+
+    return image
 
 
 st.set_page_config(
@@ -111,7 +227,7 @@ def load_app_config() -> dict:
     return tracker.load_config(CONFIG_PATH)
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, ttl=60)
 def load_history(
     window_days: int,
     route_key: str | None = None,
@@ -143,15 +259,15 @@ def load_history(
     return frame
 
 
-@st.cache_data(show_spinner=False)
-def load_latest_record() -> dict | None:
+@st.cache_data(show_spinner=False, ttl=60)
+def load_latest_record(route_key: str | None = None) -> dict | None:
     settings = load_app_config()
     db_path = BASE_DIR / str(settings["app"]["database_path"])
     database.initialize_database(db_path)
-    return database.fetch_latest_sample(db_path)
+    return database.fetch_latest_sample(db_path, route_key=route_key)
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, ttl=60)
 def load_summary(window_days: int, route_key: str | None = None) -> dict:
     settings = load_app_config()
     db_path = BASE_DIR / str(settings["app"]["database_path"])
@@ -163,7 +279,7 @@ def load_summary(window_days: int, route_key: str | None = None) -> dict:
     )
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, ttl=60)
 def load_daily_summary(
     window_days: int,
     route_key: str | None = None,
@@ -185,7 +301,7 @@ def load_daily_summary(
     return frame
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, ttl=60)
 def load_route_activity(window_days: int) -> list[dict]:
     settings = load_app_config()
     db_path = BASE_DIR / str(settings["app"]["database_path"])
@@ -1116,7 +1232,7 @@ if selected_route:
 
 history = load_history(retention_days, route_key=selected_route)
 summary = load_summary(retention_days, route_key=selected_route)
-latest_record = load_latest_record()
+latest_record = load_latest_record(route_key=selected_route)
 daily_summary = load_daily_summary(retention_days, route_key=selected_route)
 
 st.subheader(f"Viewing: {selected_route_name}")
@@ -1346,43 +1462,137 @@ with map_tab:
     map_record = latest_record
     if selected_route and history.empty:
         map_record = None
+    render_status = st.empty()
     if not map_record or not map_record.get("route_geometry_json"):
+        render_status.info("Latest route map status: waiting for route geometry.")
         st.info("No route geometry available yet.")
     else:
-        geometry = json.loads(map_record["route_geometry_json"])
-        coordinates = geometry.get("coordinates") or []
-        if not coordinates:
-            st.info("Latest route did not include geometry coordinates.")
-        else:
-            line_points = [(lat, lon) for lon, lat in coordinates]
+        render_status.info("Latest route map status: loading route geometry.")
+        coordinates: list[list[float]] = []
+        try:
+            geometry = json.loads(map_record["route_geometry_json"])
+            coordinates = geometry.get("coordinates") or []
+            if len(coordinates) < 2:
+                raise ValueError(
+                    "Latest route did not include enough coordinates to render."
+                )
+
+            line_points = []
+            for coordinate in coordinates:
+                if not isinstance(coordinate, (list, tuple)) or len(coordinate) != 2:
+                    raise ValueError("Route geometry contained malformed coordinates.")
+                lon, lat = coordinate
+                line_points.append((float(lat), float(lon)))
+
+            render_status.info("Latest route map status: preparing map layers.")
             midpoint = line_points[len(line_points) // 2]
-            folium_map = folium.Map(
-                location=midpoint,
-                zoom_start=12,
-                control_scale=True,
+            route_path = [[lon, lat] for lat, lon in line_points]
+            path_layer = pdk.Layer(
+                "PathLayer",
+                data=[{"path": route_path}],
+                get_path="path",
+                get_color=[37, 99, 235, 220],
+                width_scale=2,
+                get_width=6,
+                width_min_pixels=3,
             )
-            folium.PolyLine(
-                locations=line_points,
-                color="#2563eb",
-                weight=6,
-                opacity=0.85,
-            ).add_to(folium_map)
+
             start = line_points[0]
             end = line_points[-1]
-            folium.Marker(
-                location=start,
-                popup=f"Origin: {map_record['origin_label']}",
-                tooltip="Origin",
-                icon=folium.Icon(color="green", icon="play"),
-            ).add_to(folium_map)
-            folium.Marker(
-                location=end,
-                popup=f"Destination: {map_record['destination_label']}",
-                tooltip="Destination",
-                icon=folium.Icon(color="red", icon="stop"),
-            ).add_to(folium_map)
-            folium.LayerControl().add_to(folium_map)
-            st_folium(folium_map, height=520, width=None)
+            marker_layer = pdk.Layer(
+                "ScatterplotLayer",
+                data=[
+                    {
+                        "position": [start[1], start[0]],
+                        "color": [16, 185, 129, 220],
+                        "label": f"Origin: {map_record['origin_label']}",
+                    },
+                    {
+                        "position": [end[1], end[0]],
+                        "color": [239, 68, 68, 220],
+                        "label": (
+                            f"Destination: {map_record['destination_label']}"
+                        ),
+                    },
+                ],
+                get_position="position",
+                get_color="color",
+                get_radius=160,
+                radius_scale=1,
+                radius_min_pixels=10,
+                radius_max_pixels=18,
+            )
+
+            st.caption("Static route preview image")
+            st.image(
+                build_route_preview_image(line_points),
+                use_container_width=True,
+            )
+
+            render_status.info("Latest route map status: rendering interactive map.")
+            st.pydeck_chart(
+                pdk.Deck(
+                    map_style="road",
+                    initial_view_state=pdk.ViewState(
+                        latitude=midpoint[0],
+                        longitude=midpoint[1],
+                        zoom=10,
+                        pitch=0,
+                        bearing=0,
+                    ),
+                    layers=[path_layer, marker_layer],
+                    tooltip={"text": "{label}"},
+                    map_provider="carto",
+                ),
+                use_container_width=True,
+            )
+            render_status.success("Latest route map status: interactive map loaded.")
+        except (ValueError, TypeError, json.JSONDecodeError) as exc:
+            render_status.error(
+                "Latest route map status: interactive rendering failed, "
+                "showing fallback."
+            )
+            st.warning(f"Map render fallback active: {exc}")
+
+            fallback_points = []
+            step = max(1, len(coordinates) // 200)
+            for lon, lat in coordinates[::step]:
+                fallback_points.append({"lat": float(lat), "lon": float(lon)})
+
+            if fallback_points:
+                st.map(pd.DataFrame(fallback_points), use_container_width=True)
+
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        {
+                            "Route": map_record.get("route_name")
+                            or map_record.get("route_key")
+                            or "Unknown route",
+                            "Origin": map_record.get("origin_label", "N/A"),
+                            "Destination": map_record.get(
+                                "destination_label", "N/A"
+                            ),
+                            "Coordinate Count": len(coordinates),
+                            "Captured At": format_local_timestamp(
+                                map_record.get("collected_at")
+                            ),
+                        }
+                    ]
+                ),
+                width="stretch",
+                hide_index=True,
+            )
+
+            if coordinates:
+                fallback_line_points = [
+                    (float(lat), float(lon)) for lon, lat in coordinates
+                ]
+                st.caption("Static route preview image")
+                st.image(
+                    build_route_preview_image(fallback_line_points),
+                    use_container_width=True,
+                )
 
 st.caption(
     f"SQLite database: {app_config['database_path']} | "

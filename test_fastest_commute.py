@@ -5,6 +5,50 @@ from datetime import datetime, timedelta
 import database
 
 
+def test_fetch_latest_sample_for_route_key(tmp_path):
+    db_path = tmp_path / "travel_data.db"
+    database.initialize_database(db_path)
+
+    older = "2026-08-01T08:00:00"
+    newer = "2026-08-02T08:30:00"
+
+    for route_key, collected_at, duration in [
+        ("route-1", older, 20.0),
+        ("route-2", newer, 11.5),
+    ]:
+        database.insert_sample(
+            db_path,
+            database.TravelSample(
+                collected_at=collected_at,
+                route_key=route_key,
+                route_name=f"Route {route_key[-1]}",
+                origin_label="Home",
+                destination_label="Office",
+                origin_address="Home address",
+                destination_address="Office address",
+                origin_lat=None,
+                origin_lon=None,
+                destination_lat=None,
+                destination_lon=None,
+                duration_seconds=duration * 60,
+                duration_minutes=duration,
+                distance_meters=1200,
+                distance_km=1.2,
+                distance_miles=0.75,
+                route_summary="ok",
+                route_geometry_json='{"type":"LineString","coordinates":[[-97.7,30.3],[-97.8,30.4]]}',
+                status="success",
+                error_message=None,
+            ),
+        )
+
+    result = database.fetch_latest_sample(db_path, route_key="route-2")
+
+    assert result is not None
+    assert result["route_key"] == "route-2"
+    assert result["duration_minutes"] == 11.5
+
+
 def test_fetch_fastest_commute_for_weekday_time_window(tmp_path):
     db_path = tmp_path / "travel_data.db"
     database.initialize_database(db_path)

@@ -246,7 +246,7 @@ def fetch_samples(
         SELECT *
         FROM travel_samples
         WHERE {' AND '.join(where_clauses)}
-        ORDER BY collected_at DESC, id DESC
+        ORDER BY id DESC
     """
     connection = open_connection(db_path)
     try:
@@ -256,18 +256,34 @@ def fetch_samples(
     return [dict(row) for row in rows]
 
 
-def fetch_latest_sample(db_path: str | Path) -> dict[str, Any] | None:
+def fetch_latest_sample(
+    db_path: str | Path,
+    route_key: str | None = None,
+) -> dict[str, Any] | None:
     connection = open_connection(db_path)
     try:
-        row = connection.execute(
-            """
-            SELECT *
-            FROM travel_samples
-            WHERE status = 'success'
-            ORDER BY collected_at DESC, id DESC
-            LIMIT 1
-            """
-        ).fetchone()
+        if route_key is None:
+            row = connection.execute(
+                """
+                SELECT *
+                FROM travel_samples
+                WHERE status = 'success'
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+        else:
+            row = connection.execute(
+                """
+                SELECT *
+                FROM travel_samples
+                WHERE status = 'success'
+                  AND route_key = ?
+                                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (route_key,),
+            ).fetchone()
     finally:
         connection.close()
     return dict(row) if row else None
@@ -286,17 +302,17 @@ def fetch_route_latest_samples(
             INNER JOIN (
                 SELECT
                     COALESCE(route_key, '') AS route_key_group,
-                    MAX(collected_at) AS latest_collected_at
+                                        MAX(id) AS latest_id
                 FROM travel_samples
                 WHERE collected_at >= datetime('now', ?)
                   AND status = 'success'
                 GROUP BY COALESCE(route_key, '')
             ) AS latest
-            ON COALESCE(ts.route_key, '') = latest.route_key_group
-            AND ts.collected_at = latest.latest_collected_at
+                        ON COALESCE(ts.route_key, '') = latest.route_key_group
+                        AND ts.id = latest.latest_id
             WHERE ts.collected_at >= datetime('now', ?)
               AND ts.status = 'success'
-            ORDER BY ts.route_name, ts.route_key
+                        ORDER BY ts.id DESC
             """,
             (f'-{int(retention_days)} days', f'-{int(retention_days)} days'),
         ).fetchall()
@@ -366,7 +382,7 @@ def fetch_fastest_commute_for_timeframe(
             duration_minutes
         FROM travel_samples
         WHERE {' AND '.join(where_clauses)}
-        ORDER BY duration_minutes ASC, collected_at DESC
+        ORDER BY duration_minutes ASC, id DESC
         LIMIT 1
     """
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import re
 import signal
 import threading
@@ -76,6 +77,8 @@ def load_config(config_path: str | Path) -> dict[str, Any]:
         "CommuteMonitor/1.0 (local travel tracker)",
     )
     tracking.setdefault("nominatim_email", None)
+    tracking.setdefault("routing_provider", "tomtom")
+    tracking.setdefault("tomtom_api_key", os.getenv("TOMTOM_API_KEY"))
     tracking.setdefault("routes", [])
     if not tracking["routes"] and (
         tracking.get("origin") or tracking.get("destination")
@@ -217,6 +220,26 @@ def fetch_route(
     origin: Location,
     destination: Location,
     routing_profile: str,
+    routing_provider: str,
+    tomtom_api_key: str | None = None,
+) -> dict[str, Any]:
+    provider = str(routing_provider or "osrm").strip().lower()
+    if provider == "tomtom":
+        return fetch_route_tomtom(
+            session=session,
+            origin=origin,
+            destination=destination,
+            routing_profile=routing_profile,
+            tomtom_api_key=tomtom_api_key,
+        )
+    return fetch_route_osrm(session, origin, destination, routing_profile)
+
+
+def fetch_route_osrm(
+    session: requests.Session,
+    origin: Location,
+    destination: Location,
+    routing_profile: str,
 ) -> dict[str, Any]:
     route_url = f"https://router.project-osrm.org/route/v1/{routing_profile}/"
     route_url += (
@@ -238,6 +261,75 @@ def fetch_route(
     return routes[0]
 
 
+def fetch_route_tomtom(
+    session: requests.Session,
+    origin: Location,
+    destination: Location,
+    routing_profile: str,
+    tomtom_api_key: str | None,
+) -> dict[str, Any]:
+    if not tomtom_api_key:
+        raise ValueError(
+            "TomTom routing provider selected but no API key configured"
+        )
+
+    travel_mode = {
+        "driving": "car",
+        "walking": "pedestrian",
+        "cycling": "bicycle",
+    }.get(routing_profile, "car")
+
+    route_url = (
+        "https://api.tomtom.com/routing/1/calculateRoute/"
+        f"{origin.latitude},{origin.longitude}:"
+        f"{destination.latitude},{destination.longitude}/json"
+    )
+    params = {
+        "key": tomtom_api_key,
+        "traffic": "true",
+        "travelMode": travel_mode,
+        "computeBestOrder": "false",
+        "routeRepresentation": "polyline",
+    }
+    response = session.get(route_url, params=params, timeout=30)
+    response.raise_for_status()
+    payload = response.json()
+    routes = payload.get("routes") or []
+    if not routes:
+        raise ValueError("TomTom returned no routes for the requested locations")
+
+    route = routes[0]
+    summary = route.get("summary") or {}
+    route_points = route.get("legs", [{}])[0].get("points") or []
+    coordinates = []
+    for point in route_points:
+        lat = point.get("latitude")
+        lon = point.get("longitude")
+        if lat is None or lon is None:
+            continue
+        coordinates.append([float(lon), float(lat)])
+
+    if not coordinates:
+        raise ValueError("TomTom route geometry did not include coordinates")
+
+    return {
+        "duration": float(summary.get("travelTimeInSeconds", 0.0)),
+        "distance": float(summary.get("lengthInMeters", 0.0)),
+        "geometry": {
+            "type": "LineString",
+            "coordinates": coordinates,
+        },
+        "legs": [
+            {
+                "summary": (
+                    "Traffic-aware route "
+                    f"(delay: {float(summary.get('trafficDelayInSeconds', 0.0)) / 60.0:.1f} mins)"
+                )
+            }
+        ],
+    }
+
+
 def extract_route_sample(
     config: dict[str, Any],
     route_config: dict[str, Any],
@@ -246,23 +338,46 @@ def extract_route_sample(
     user_agent = str(tracking["user_agent"])
     session = build_session(user_agent)
     email = tracking.get("nominatim_email")
+    routing_provider = str(tracking.get("routing_provider", "osrm"))
+    tomtom_api_key = tracking.get("tomtom_api_key")
     origin = resolve_location(session, route_config["origin"], email=email)
     destination = resolve_location(
         session,
         route_config["destination"],
         email=email,
     )
-    route = fetch_route(
-        session,
-        origin,
-        destination,
-        str(
-            route_config.get(
-                "routing_profile",
-                tracking.get("routing_profile", "driving"),
-            )
-        ),
+    routing_profile = str(
+        route_config.get(
+            "routing_profile",
+            tracking.get("routing_profile", "driving"),
+        )
     )
+    try:
+        route = fetch_route(
+            session=session,
+            origin=origin,
+            destination=destination,
+            routing_profile=routing_profile,
+            routing_provider=routing_provider,
+            tomtom_api_key=(str(tomtom_api_key) if tomtom_api_key else None),
+        )
+    except (
+        requests.RequestException,
+        ValueError,
+    ) as exc:
+        if routing_provider.lower() != "tomtom":
+            raise
+        logging.warning(
+            "TomTom routing failed (%s). Falling back to OSRM for %s.",
+            exc,
+            route_config.get("name", route_config.get("key", "route")),
+        )
+        route = fetch_route_osrm(
+            session=session,
+            origin=origin,
+            destination=destination,
+            routing_profile=routing_profile,
+        )
     summary = (
         route.get("legs", [{}])[0].get("summary")
         or route.get("name")
@@ -387,10 +502,12 @@ def run_daemon(
     config = load_config(config_path)
     app_config = config["app"]
     interval_seconds = int(app_config["interval_seconds"])
+    configured_timezone = str(app_config.get("timezone", "America/Chicago"))
+    job_timezone = ZoneInfo(configured_timezone)
     database.initialize_database(BASE_DIR / str(app_config["database_path"]))
 
     stop_event = threading.Event()
-    scheduler = BackgroundScheduler(timezone=UTC)
+    scheduler = BackgroundScheduler(timezone=job_timezone)
     scheduler.add_job(
         lambda: collect_and_store(config_path),
         "interval",
@@ -418,8 +535,9 @@ def run_daemon(
             )
 
     logging.info(
-        "Tracker daemon started with %s second interval",
+        "Tracker daemon started with %s second interval in %s timezone",
         interval_seconds,
+        configured_timezone,
     )
     try:
         while not stop_event.wait(1):
