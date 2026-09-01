@@ -727,6 +727,13 @@ selected_route_options.extend(
     (route["key"], route["name"]) for route in route_catalog
 )
 
+route_option_labels = dict(selected_route_options)
+if "active_route_key" not in st.session_state:
+    st.session_state["active_route_key"] = "__all__"
+
+if st.session_state["active_route_key"] not in route_option_labels:
+    st.session_state["active_route_key"] = "__all__"
+
 with st.sidebar:
     st.header("Tracked Routes")
     st.caption(f"{len(route_catalog)} configured, max 3 active routes")
@@ -1211,24 +1218,34 @@ if st.button("📡 Pull Data Now", width="stretch"):
             }
             st.rerun()
 
-selected_route_key = st.selectbox(
-    "View route data",
-    [option[0] for option in selected_route_options],
-    format_func=lambda value: dict(selected_route_options)[value],
+st.markdown(
+    '<div class="section-title">Tracked Routes</div>',
+    unsafe_allow_html=True,
 )
-selected_route = (
-    None if selected_route_key == "__all__" else selected_route_key
-)
-selected_route_name = "All routes"
-if selected_route:
-    selected_route_name = next(
-        (
-            route["name"]
-            for route in route_catalog
-            if route["key"] == selected_route
-        ),
-        selected_route,
-    )
+current_active_route_key = str(st.session_state["active_route_key"])
+pending_active_route_key = current_active_route_key
+tile_columns = st.columns(len(selected_route_options))
+for index, (option_key, option_label) in enumerate(selected_route_options):
+    with tile_columns[index]:
+        if st.button(
+            option_label,
+            key=f"route_tile_{option_key}",
+            type=(
+                "primary"
+                if current_active_route_key == option_key
+                else "secondary"
+            ),
+            width="stretch",
+        ):
+            pending_active_route_key = option_key
+
+if pending_active_route_key != current_active_route_key:
+    st.session_state["active_route_key"] = pending_active_route_key
+    st.rerun()
+
+selected_route_key = str(st.session_state["active_route_key"])
+selected_route = None if selected_route_key == "__all__" else selected_route_key
+selected_route_name = route_option_labels.get(selected_route_key, "All routes")
 
 history = load_history(retention_days, route_key=selected_route)
 summary = load_summary(retention_days, route_key=selected_route)
@@ -1280,319 +1297,319 @@ with col3:
     render_metric_card("Latest", latest_label, latest_subtitle)
 
 st.markdown(
-    '<div class="section-title">Tracked Routes</div>',
-    unsafe_allow_html=True,
-)
-route_columns = st.columns(max(1, min(3, len(route_catalog))))
-for index, route in enumerate(route_catalog):
-    with route_columns[index % len(route_columns)]:
-        render_route_card(route, activity_by_key.get(route["key"]))
-
-st.markdown(
     '<div class="section-title">Fastest Commute Finder</div>',
     unsafe_allow_html=True,
 )
 settings = load_app_config()
 db_path = BASE_DIR / str(settings["app"]["database_path"])
 
-timeframe_mode = st.radio(
-    "Fastest commute scope",
-    ["All week", "Specific days and times"],
-    horizontal=True,
-)
-
-if timeframe_mode == "All week":
-    all_week_fastest = database.fetch_fastest_commute_for_timeframe(
-        db_path,
-        retention_days=retention_days,
-        route_key=selected_route,
+if selected_route is None:
+    st.info(
+        "Detailed finder reports are shown only for a single route. "
+        "Choose a route tile above to filter finder results."
     )
-    if all_week_fastest is None:
-        st.info("No successful commute samples are available for this route window yet.")
-    else:
-        duration_value = float(all_week_fastest["duration_minutes"])
-        st.metric(
-            "Fastest commute this week",
-            f"{duration_value:.2f} mins",
-            f"Reported at {format_local_timestamp(all_week_fastest['collected_at'])}",
-        )
 else:
-    selected_weekdays = st.multiselect(
-        "Days of week",
-        DAY_ORDER,
-        default=DAY_ORDER,
-        help="Filter the fastest commute to the selected days.",
+    timeframe_mode = st.radio(
+        "Fastest commute scope",
+        ["All week", "Specific days and times"],
+        horizontal=True,
     )
-    start_time_input = st.text_input(
-        "Start time (HH:MM)",
-        value="07:00",
-        help="Earliest time in the window to inspect.",
-    )
-    end_time_input = st.text_input(
-        "End time (HH:MM)",
-        value="09:00",
-        help="Latest time in the window to inspect.",
-    )
-    if st.button("Show fastest in selected timeframe"):
-        custom_result = database.fetch_fastest_commute_for_timeframe(
+
+    if timeframe_mode == "All week":
+        all_week_fastest = database.fetch_fastest_commute_for_timeframe(
             db_path,
             retention_days=retention_days,
             route_key=selected_route,
-            weekdays=selected_weekdays,
-            start_time=start_time_input,
-            end_time=end_time_input,
         )
-        if custom_result is None:
-            st.warning(
-                "No commute samples match the selected day/time window. "
-                "Try widening the range or selecting more days."
+        if all_week_fastest is None:
+            st.info(
+                "No successful commute samples are available for this route window yet."
             )
         else:
-            duration_value = float(custom_result["duration_minutes"])
-            st.success(
-                "Fastest commute in the selected timeframe: "
-                f"{duration_value:.2f} mins (reported at {format_local_timestamp(custom_result['collected_at'])})."
+            duration_value = float(all_week_fastest["duration_minutes"])
+            st.metric(
+                "Fastest commute this week",
+                f"{duration_value:.2f} mins",
+                f"Reported at {format_local_timestamp(all_week_fastest['collected_at'])}",
             )
-
-st.markdown(
-    '<div class="section-title">Route Overview</div>',
-    unsafe_allow_html=True,
-)
-
-chart_tab, raw_tab, aggregate_tab, map_tab = st.tabs(
-    ["Trend Chart", "Raw History", "Aggregated View", "Latest Route Map"]
-)
-
-with chart_tab:
-    if history.empty:
-        st.info("No route samples available yet.")
     else:
-        chart_frame = history.sort_values(["Day", "Timestamp Sort"])
-        chart_frame["Day"] = pd.Categorical(
-            chart_frame["Day"],
-            categories=DAY_ORDER,
-            ordered=True,
+        selected_weekdays = st.multiselect(
+            "Days of week",
+            DAY_ORDER,
+            default=DAY_ORDER,
+            help="Filter the fastest commute to the selected days.",
         )
-        chart_frame = chart_frame.sort_values(["Day", "Timestamp Sort"])
-        x_order = sorted(chart_frame["Time of Day"].unique())
-        fig = px.line(
-            chart_frame,
-            x="Time of Day",
-            y="Duration (mins)",
-            color="Day",
-            markers=True,
-            category_orders={"Day": DAY_ORDER, "Time of Day": x_order},
-            title="Travel time by time of day",
+        start_time_input = st.text_input(
+            "Start time (HH:MM)",
+            value="07:00",
+            help="Earliest time in the window to inspect.",
         )
-        fig.update_layout(
-            height=520,
-            xaxis_title="Time of Day",
-            yaxis_title="Duration (minutes)",
-            legend_title_text="Day of Week",
-            margin=dict(l=20, r=20, t=50, b=20),
+        end_time_input = st.text_input(
+            "End time (HH:MM)",
+            value="09:00",
+            help="Latest time in the window to inspect.",
         )
-        st.plotly_chart(fig, width="stretch")
-
-with raw_tab:
-    if history.empty:
-        st.info("No data collected yet.")
-    else:
-        raw_columns = [
-            "Timestamp",
-            "Day",
-            "Time of Day",
-            "Duration (mins)",
-            "Distance (km)",
-            "Distance (mi)",
-            "Delta vs Fastest Route (mins)",
-            "Route Summary",
-        ]
-        display_frame = history.loc[:, raw_columns].sort_values(
-            "Timestamp",
-            ascending=False,
-        )
-        st.dataframe(
-            display_frame,
-            width="stretch",
-            hide_index=True,
-        )
-        csv = display_frame.to_csv(index=False).encode("utf-8")
-        st.download_button(
-            "Download history as CSV",
-            data=csv,
-            file_name="travel_history.csv",
-            mime="text/csv",
-        )
-
-with aggregate_tab:
-    if daily_summary.empty:
-        st.info("No aggregation available yet.")
-    else:
-        aggregate_frame = daily_summary.sort_values(["date"], ascending=False)
-        aggregate_frame = aggregate_frame.rename(
-            columns={
-                "date": "Date",
-                "samples": "Samples",
-                "avg_duration_minutes": "Avg Duration (mins)",
-                "min_duration_minutes": "Min Duration (mins)",
-                "max_duration_minutes": "Max Duration (mins)",
-                "avg_distance_km": "Avg Distance (km)",
-                "avg_distance_miles": "Avg Distance (mi)",
-            }
-        )
-        aggregate_frame = aggregate_frame[
-            [
-                "Date",
-                "Day",
-                "Samples",
-                "Avg Duration (mins)",
-                "Min Duration (mins)",
-                "Max Duration (mins)",
-                "Avg Distance (km)",
-                "Avg Distance (mi)",
-            ]
-        ]
-        st.dataframe(
-            aggregate_frame,
-            width="stretch",
-            hide_index=True,
-        )
-
-with map_tab:
-    map_record = latest_record
-    if selected_route and history.empty:
-        map_record = None
-    render_status = st.empty()
-    if not map_record or not map_record.get("route_geometry_json"):
-        render_status.info("Latest route map status: waiting for route geometry.")
-        st.info("No route geometry available yet.")
-    else:
-        render_status.info("Latest route map status: loading route geometry.")
-        coordinates: list[list[float]] = []
-        try:
-            geometry = json.loads(map_record["route_geometry_json"])
-            coordinates = geometry.get("coordinates") or []
-            if len(coordinates) < 2:
-                raise ValueError(
-                    "Latest route did not include enough coordinates to render."
+        if st.button("Show fastest in selected timeframe"):
+            custom_result = database.fetch_fastest_commute_for_timeframe(
+                db_path,
+                retention_days=retention_days,
+                route_key=selected_route,
+                weekdays=selected_weekdays,
+                start_time=start_time_input,
+                end_time=end_time_input,
+            )
+            if custom_result is None:
+                st.warning(
+                    "No commute samples match the selected day/time window. "
+                    "Try widening the range or selecting more days."
+                )
+            else:
+                duration_value = float(custom_result["duration_minutes"])
+                st.success(
+                    "Fastest commute in the selected timeframe: "
+                    f"{duration_value:.2f} mins (reported at {format_local_timestamp(custom_result['collected_at'])})."
                 )
 
-            line_points = []
-            for coordinate in coordinates:
-                if not isinstance(coordinate, (list, tuple)) or len(coordinate) != 2:
-                    raise ValueError("Route geometry contained malformed coordinates.")
-                lon, lat = coordinate
-                line_points.append((float(lat), float(lon)))
+if selected_route is not None:
+    st.markdown(
+        '<div class="section-title">Route Overview</div>',
+        unsafe_allow_html=True,
+    )
 
-            render_status.info("Latest route map status: preparing map layers.")
-            midpoint = line_points[len(line_points) // 2]
-            route_path = [[lon, lat] for lat, lon in line_points]
-            path_layer = pdk.Layer(
-                "PathLayer",
-                data=[{"path": route_path}],
-                get_path="path",
-                get_color=[37, 99, 235, 220],
-                width_scale=2,
-                get_width=6,
-                width_min_pixels=3,
+    chart_tab, raw_tab, aggregate_tab, map_tab = st.tabs(
+        ["Trend Chart", "Raw History", "Aggregated View", "Latest Route Map"]
+    )
+
+    with chart_tab:
+        if history.empty:
+            st.info("No route samples available yet.")
+        else:
+            chart_frame = history.sort_values(["Day", "Timestamp Sort"])
+            chart_frame["Day"] = pd.Categorical(
+                chart_frame["Day"],
+                categories=DAY_ORDER,
+                ordered=True,
             )
-
-            start = line_points[0]
-            end = line_points[-1]
-            marker_layer = pdk.Layer(
-                "ScatterplotLayer",
-                data=[
-                    {
-                        "position": [start[1], start[0]],
-                        "color": [16, 185, 129, 220],
-                        "label": f"Origin: {map_record['origin_label']}",
-                    },
-                    {
-                        "position": [end[1], end[0]],
-                        "color": [239, 68, 68, 220],
-                        "label": (
-                            f"Destination: {map_record['destination_label']}"
-                        ),
-                    },
-                ],
-                get_position="position",
-                get_color="color",
-                get_radius=160,
-                radius_scale=1,
-                radius_min_pixels=10,
-                radius_max_pixels=18,
+            chart_frame = chart_frame.sort_values(["Day", "Timestamp Sort"])
+            x_order = sorted(chart_frame["Time of Day"].unique())
+            fig = px.line(
+                chart_frame,
+                x="Time of Day",
+                y="Duration (mins)",
+                color="Day",
+                markers=True,
+                category_orders={"Day": DAY_ORDER, "Time of Day": x_order},
+                title="Travel time by time of day",
             )
-
-            st.caption("Static route preview image")
-            st.image(
-                build_route_preview_image(line_points),
-                use_container_width=True,
+            fig.update_layout(
+                height=520,
+                xaxis_title="Time of Day",
+                yaxis_title="Duration (minutes)",
+                legend_title_text="Day of Week",
+                margin=dict(l=20, r=20, t=50, b=20),
             )
+            st.plotly_chart(fig, width="stretch")
 
-            render_status.info("Latest route map status: rendering interactive map.")
-            st.pydeck_chart(
-                pdk.Deck(
-                    map_style="road",
-                    initial_view_state=pdk.ViewState(
-                        latitude=midpoint[0],
-                        longitude=midpoint[1],
-                        zoom=10,
-                        pitch=0,
-                        bearing=0,
-                    ),
-                    layers=[path_layer, marker_layer],
-                    tooltip={"text": "{label}"},
-                    map_provider="carto",
-                ),
-                use_container_width=True,
+    with raw_tab:
+        if history.empty:
+            st.info("No data collected yet.")
+        else:
+            raw_columns = [
+                "Timestamp",
+                "Day",
+                "Time of Day",
+                "Duration (mins)",
+                "Distance (km)",
+                "Distance (mi)",
+                "Delta vs Fastest Route (mins)",
+                "Route Summary",
+            ]
+            display_frame = history.loc[:, raw_columns].sort_values(
+                "Timestamp",
+                ascending=False,
             )
-            render_status.success("Latest route map status: interactive map loaded.")
-        except (ValueError, TypeError, json.JSONDecodeError) as exc:
-            render_status.error(
-                "Latest route map status: interactive rendering failed, "
-                "showing fallback."
-            )
-            st.warning(f"Map render fallback active: {exc}")
-
-            fallback_points = []
-            step = max(1, len(coordinates) // 200)
-            for lon, lat in coordinates[::step]:
-                fallback_points.append({"lat": float(lat), "lon": float(lon)})
-
-            if fallback_points:
-                st.map(pd.DataFrame(fallback_points), use_container_width=True)
-
             st.dataframe(
-                pd.DataFrame(
-                    [
-                        {
-                            "Route": map_record.get("route_name")
-                            or map_record.get("route_key")
-                            or "Unknown route",
-                            "Origin": map_record.get("origin_label", "N/A"),
-                            "Destination": map_record.get(
-                                "destination_label", "N/A"
-                            ),
-                            "Coordinate Count": len(coordinates),
-                            "Captured At": format_local_timestamp(
-                                map_record.get("collected_at")
-                            ),
-                        }
-                    ]
-                ),
+                display_frame,
+                width="stretch",
+                hide_index=True,
+            )
+            csv = display_frame.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                "Download history as CSV",
+                data=csv,
+                file_name="travel_history.csv",
+                mime="text/csv",
+            )
+
+    with aggregate_tab:
+        if daily_summary.empty:
+            st.info("No aggregation available yet.")
+        else:
+            aggregate_frame = daily_summary.sort_values(["date"], ascending=False)
+            aggregate_frame = aggregate_frame.rename(
+                columns={
+                    "date": "Date",
+                    "samples": "Samples",
+                    "avg_duration_minutes": "Avg Duration (mins)",
+                    "min_duration_minutes": "Min Duration (mins)",
+                    "max_duration_minutes": "Max Duration (mins)",
+                    "avg_distance_km": "Avg Distance (km)",
+                    "avg_distance_miles": "Avg Distance (mi)",
+                }
+            )
+            aggregate_frame = aggregate_frame[
+                [
+                    "Date",
+                    "Day",
+                    "Samples",
+                    "Avg Duration (mins)",
+                    "Min Duration (mins)",
+                    "Max Duration (mins)",
+                    "Avg Distance (km)",
+                    "Avg Distance (mi)",
+                ]
+            ]
+            st.dataframe(
+                aggregate_frame,
                 width="stretch",
                 hide_index=True,
             )
 
-            if coordinates:
-                fallback_line_points = [
-                    (float(lat), float(lon)) for lon, lat in coordinates
-                ]
+    with map_tab:
+        map_record = latest_record
+        if selected_route and history.empty:
+            map_record = None
+        render_status = st.empty()
+        if not map_record or not map_record.get("route_geometry_json"):
+            render_status.info("Latest route map status: waiting for route geometry.")
+            st.info("No route geometry available yet.")
+        else:
+            render_status.info("Latest route map status: loading route geometry.")
+            coordinates: list[list[float]] = []
+            try:
+                geometry = json.loads(map_record["route_geometry_json"])
+                coordinates = geometry.get("coordinates") or []
+                if len(coordinates) < 2:
+                    raise ValueError(
+                        "Latest route did not include enough coordinates to render."
+                    )
+
+                line_points = []
+                for coordinate in coordinates:
+                    if not isinstance(coordinate, (list, tuple)) or len(coordinate) != 2:
+                        raise ValueError("Route geometry contained malformed coordinates.")
+                    lon, lat = coordinate
+                    line_points.append((float(lat), float(lon)))
+
+                render_status.info("Latest route map status: preparing map layers.")
+                midpoint = line_points[len(line_points) // 2]
+                route_path = [[lon, lat] for lat, lon in line_points]
+                path_layer = pdk.Layer(
+                    "PathLayer",
+                    data=[{"path": route_path}],
+                    get_path="path",
+                    get_color=[37, 99, 235, 220],
+                    width_scale=2,
+                    get_width=6,
+                    width_min_pixels=3,
+                )
+
+                start = line_points[0]
+                end = line_points[-1]
+                marker_layer = pdk.Layer(
+                    "ScatterplotLayer",
+                    data=[
+                        {
+                            "position": [start[1], start[0]],
+                            "color": [16, 185, 129, 220],
+                            "label": f"Origin: {map_record['origin_label']}",
+                        },
+                        {
+                            "position": [end[1], end[0]],
+                            "color": [239, 68, 68, 220],
+                            "label": (
+                                f"Destination: {map_record['destination_label']}"
+                            ),
+                        },
+                    ],
+                    get_position="position",
+                    get_color="color",
+                    get_radius=160,
+                    radius_scale=1,
+                    radius_min_pixels=10,
+                    radius_max_pixels=18,
+                )
+
                 st.caption("Static route preview image")
                 st.image(
-                    build_route_preview_image(fallback_line_points),
+                    build_route_preview_image(line_points),
                     use_container_width=True,
                 )
+
+                render_status.info("Latest route map status: rendering interactive map.")
+                st.pydeck_chart(
+                    pdk.Deck(
+                        map_style="road",
+                        initial_view_state=pdk.ViewState(
+                            latitude=midpoint[0],
+                            longitude=midpoint[1],
+                            zoom=10,
+                            pitch=0,
+                            bearing=0,
+                        ),
+                        layers=[path_layer, marker_layer],
+                        tooltip={"text": "{label}"},
+                        map_provider="carto",
+                    ),
+                    use_container_width=True,
+                )
+                render_status.success("Latest route map status: interactive map loaded.")
+            except (ValueError, TypeError, json.JSONDecodeError) as exc:
+                render_status.error(
+                    "Latest route map status: interactive rendering failed, "
+                    "showing fallback."
+                )
+                st.warning(f"Map render fallback active: {exc}")
+
+                fallback_points = []
+                step = max(1, len(coordinates) // 200)
+                for lon, lat in coordinates[::step]:
+                    fallback_points.append({"lat": float(lat), "lon": float(lon)})
+
+                if fallback_points:
+                    st.map(pd.DataFrame(fallback_points), use_container_width=True)
+
+                st.dataframe(
+                    pd.DataFrame(
+                        [
+                            {
+                                "Route": map_record.get("route_name")
+                                or map_record.get("route_key")
+                                or "Unknown route",
+                                "Origin": map_record.get("origin_label", "N/A"),
+                                "Destination": map_record.get(
+                                    "destination_label", "N/A"
+                                ),
+                                "Coordinate Count": len(coordinates),
+                                "Captured At": format_local_timestamp(
+                                    map_record.get("collected_at")
+                                ),
+                            }
+                        ]
+                    ),
+                    width="stretch",
+                    hide_index=True,
+                )
+
+                if coordinates:
+                    fallback_line_points = [
+                        (float(lat), float(lon)) for lon, lat in coordinates
+                    ]
+                    st.caption("Static route preview image")
+                    st.image(
+                        build_route_preview_image(fallback_line_points),
+                        use_container_width=True,
+                    )
 
 st.caption(
     f"SQLite database: {app_config['database_path']} | "
